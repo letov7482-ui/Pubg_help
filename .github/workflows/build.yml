@@ -5,7 +5,7 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
     - name: Checkout repo
@@ -22,7 +22,7 @@ jobs:
         mkdir -p tools && cd tools
         wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
         wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
-        pip install cloudscraper --quiet
+        pip install cloudscraper capstone pyelftools --quiet
 
     - name: Download APK
       run: |
@@ -46,48 +46,164 @@ jobs:
           cp lib/armeabi-v7a/*.so ../libs/
         fi
 
-    - name: Full analysis report
+    - name: Deep anticheat analysis
       run: |
-        cd work/libs
+        cd work
         
-        REPORT=../report.txt
-        echo "=== LIBRARY COUNT: $(ls *.so | wc -l) ===" > $REPORT
-        echo "" >> $REPORT
+        cat > analyze_anticheat.py << 'EOF'
+        import struct
+        import sys
         
-        echo "=== ALL LIBRARIES WITH SIZES ===" >> $REPORT
-        for f in $(ls -S *.so); do
-          SIZE=$(stat -c%s "$f")
-          SIZE_MB=$((SIZE / 1048576))
-          echo "${SIZE_MB}MB  $f" >> $REPORT
-        done
-        echo "" >> $REPORT
+        def analyze_elf(filepath, name):
+            print(f"\n{'='*60}")
+            print(f"ANALYZING: {name}")
+            print(f"{'='*60}")
+            
+            with open(filepath, 'rb') as f:
+                data = f.read()
+            
+            size = len(data)
+            print(f"Size: {size} bytes ({size/1024/1024:.1f} MB)")
+            
+            # ELF header
+            magic = data[:4]
+            if magic != b'\x7fELF':
+                print("Not an ELF file!")
+                return
+            
+            bits = data[4]
+            print(f"Architecture: {'64-bit' if bits == 2 else '32-bit'}")
+            
+            # Находим секции
+            if bits == 2:
+                # 64-bit
+                e_shoff = struct.unpack_from('<Q', data, 0x28)[0]
+                e_shentsize = struct.unpack_from('<H', data, 0x3A)[0]
+                e_shnum = struct.unpack_from('<H', data, 0x3C)[0]
+                e_shstrndx = struct.unpack_from('<H', data, 0x3E)[0]
+                
+                sections = []
+                for i in range(e_shnum):
+                    offset = e_shoff + i * e_shentsize
+                    sh_name = struct.unpack_from('<I', data, offset)[0]
+                    sh_type = struct.unpack_from('<I', data, offset+4)[0]
+                    sh_addr = struct.unpack_from('<Q', data, offset+16)[0]
+                    sh_offset = struct.unpack_from('<Q', data, offset+24)[0]
+                    sh_size = struct.unpack_from('<Q', data, offset+32)[0]
+                    sections.append({
+                        'name_idx': sh_name, 'type': sh_type,
+                        'addr': sh_addr, 'offset': sh_offset, 'size': sh_size
+                    })
+            else:
+                print("32-bit ELF — need different parsing")
+                return
+            
+            # Имена секций
+            shstr = sections[e_shstrndx]
+            strtab = data[shstr['offset']:shstr['offset']+shstr['size']]
+            
+            def get_name(idx):
+                end = strtab.find(b'\x00', idx)
+                return strtab[idx:end].decode('utf-8', errors='replace')
+            
+            print("\nSections:")
+            for s in sections:
+                name = get_name(s['name_idx'])
+                if name in ['.text', '.data', '.bss', '.rodata', '.dynsym', '.dynstr', '.symtab', '.init_array', '.fini_array', '.got', '.got.plt']:
+                    print(f"  {name:20s} addr=0x{s['addr']:08x} off=0x{s['offset']:08x} size={s['size']}")
+            
+            # Экспорты (dynsym)
+            print("\nKey Exports:")
+            for s in sections:
+                name = get_name(s['name_idx'])
+                if name == '.dynsym':
+                    strtab_sec = None
+                    for s2 in sections:
+                        if get_name(s2['name_idx']) == '.dynstr':
+                            strtab_sec = s2
+                            break
+                    if strtab_sec:
+                        strdata = data[strtab_sec['offset']:strtab_sec['offset']+strtab_sec['size']]
+                        
+                        num_syms = s['size'] // 24  # 24 bytes per 64-bit Elf64_Sym
+                        for i in range(num_syms):
+                            off = s['offset'] + i * 24
+                            st_name = struct.unpack_from('<I', data, off)[0]
+                            st_info = data[off+4]
+                            st_value = struct.unpack_from('<Q', data, off+8)[0]
+                            
+                            end = strdata.find(b'\x00', st_name)
+                            sym_name = strdata[st_name:end].decode('utf-8', errors='replace')
+                            
+                            if sym_name and any(kw in sym_name.lower() for kw in ['init', 'check', 'detect', 'hook', 'scan', 'verify', 'integrity', 'security', 'monitor']):
+                                print(f"  {sym_name:50s} addr=0x{st_value:08x}")
+                            elif sym_name and sym_name.startswith(('JNI_OnLoad', 'anog', 'ano_')):
+                                print(f"  {sym_name:50s} addr=0x{st_value:08x}")
+            
+            # Критические строки
+            print("\nCritical strings:")
+            strings_to_find = [
+                b'root', b'su', b'magisk', b'frida', b'xposed', b'substrate',
+                b'hook', b'inject', b'ptrace', b'proc/self', b'/system/bin/su',
+                b'debug', b'tracerpid', b'status', b'cmdline', b'maps',
+                b'signature', b'integrity', b'tamper', b'modified', b'patch',
+                b'emulator', b'vmos', b'virtual', b'gamesguardian', b'gg',
+            ]
+            
+            found = {}
+            for target in strings_to_find:
+                count = data.lower().count(target)
+                if count > 0:
+                    found[target.decode()] = count
+            
+            for k, v in sorted(found.items(), key=lambda x: -x[1])[:20]:
+                print(f"  '{k}': {v} occurrences")
+            
+            return
         
-        echo "=== CRITICAL TARGETS FOUND ===" >> $REPORT
-        for f in *.so; do
-          if [ $(stat -c%s "$f") -gt 50000000 ]; then
-            echo "ENGINE CANDIDATE: $f ($(stat -c%s "$f") bytes)" >> $REPORT
-          fi
-        done
-        echo "" >> $REPORT
+        # Анализируем ключевые библиотеки
+        libs = [
+            ('libs/libanogs.so', 'libanogs.so — ANTICHEAT MAIN'),
+            ('libs/libanort.so', 'libanort.so — ANTICHEAT HELPER'),
+            ('libs/libTDataMaster.so', 'libTDataMaster.so — TELEMETRY'),
+        ]
         
-        echo "=== LARGEST 5 LIBRARIES — KEY STRINGS ===" >> $REPORT
-        for f in $(ls -S *.so | head -5); do
-          echo "" >> $REPORT
-          echo "--- $f ($(stat -c%s "$f") bytes) ---" >> $REPORT
-          echo "UE4/Engine:" >> $REPORT
-          strings "$f" | grep -iE "GObjects|GNames|GEngine|GWorld|ProcessEvent|UWorld|AActor|APawn|FVector|FRotator|ULocalPlayer" | sort -u | head -20 >> $REPORT 2>/dev/null || true
-          echo "AntiCheat:" >> $REPORT
-          strings "$f" | grep -iE "anticheat|anti_cheat|detect_root|detect_hook|detect_frida|integrity_check|signature_check|memory_scan|ptrace_check" | sort -u | head -20 >> $REPORT 2>/dev/null || true
-          echo "Security:" >> $REPORT
-          strings "$f" | grep -iE "tersafe|sgmain|SecShell|DexHelper|NSaferOnly|boom|tp2|SecurityCheck" | sort -u | head -15 >> $REPORT 2>/dev/null || true
-        done
-        echo "" >> $REPORT
+        for path, name in libs:
+            try:
+                analyze_elf(path, name)
+            except Exception as e:
+                print(f"Error analyzing {path}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        echo "=== ALL .SO FILE NAMES ===" >> $REPORT
-        ls *.so >> $REPORT
-        echo "" >> $REPORT
+        # Анализ libUE4.so — только AntiCheat секции
+        print(f"\n{'='*60}")
+        print("libUE4.so — ANTICHEAT COMPONENTS")
+        print(f"{'='*60}")
         
-        echo "=== REPORT COMPLETE ===" >> $REPORT
+        try:
+            with open('libs/libUE4.so', 'rb') as f:
+                ue4 = f.read()
+            
+            ac_strings = []
+            for line in ue4.split(b'\x00'):
+                if b'AntiCheat' in line and len(line) < 200:
+                    try:
+                        s = line.decode('utf-8', errors='replace')
+                        if s not in ac_strings:
+                            ac_strings.append(s)
+                    except:
+                        pass
+            
+            print(f"AntiCheat strings found: {len(ac_strings)}")
+            for s in ac_strings[:30]:
+                print(f"  {s}")
+        except Exception as e:
+            print(f"Error: {e}")
+        
+        EOF
+        
+        python3 analyze_anticheat.py 2>&1 | tee report_anticheat.txt
 
     - name: Rebuild APK
       run: |
@@ -104,7 +220,7 @@ jobs:
         mkdir -p output
         cp work/repacked-aligned-debugSigned.apk output/pm-mod-test.apk 2>/dev/null || true
         cp work/original.apk output/original.apk 2>/dev/null || true
-        cp work/report.txt output/report.txt
+        cp work/report_anticheat.txt output/report_anticheat.txt
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -112,13 +228,13 @@ jobs:
         name: pm-build
         path: output/
 
-    - name: PRINT SUMMARY AT END
+    - name: PRINT FINAL SUMMARY
       run: |
         echo ""
         echo "=========================================="
-        echo "     CRITICAL INFO — READ BELOW"
+        echo "  ANTICHEAT ANALYSIS — COPY THIS"
         echo "=========================================="
-        cat work/report.txt
+        head -200 work/report_anticheat.txt
         echo "=========================================="
-        echo "     END OF REPORT"
+        echo "  END"
         echo "=========================================="
