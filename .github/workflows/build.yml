@@ -1,0 +1,107 @@
+name: Build Mod
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: 'Direct APK download URL'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Download tools
+      run: |
+        mkdir -p tools && cd tools
+        
+        # apktool для декомпиляции
+        wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
+        
+        # uber-apk-signer для подписи
+        wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
+
+    - name: Download APK
+      run: |
+        mkdir -p work
+        cd work
+        wget -q "${{ github.event.inputs.https://apkpure.com/ru/pubg-mobile-game/com.tencent.ig/amp }}" -O original.apk || {
+          echo "Direct download failed, trying mirror..."
+          exit 1
+        }
+        ls -la original.apk
+
+    - name: Decompile APK
+      run: |
+        cd work
+        java -jar ../tools/apktool.jar d original.apk -o decoded --force
+
+    - name: Extract native libraries
+      run: |
+        cd work/decoded
+        mkdir -p ../libs
+        if [ -d "lib/arm64-v8a" ]; then
+          cp lib/arm64-v8a/*.so ../libs/
+        elif [ -d "lib/armeabi-v7a" ]; then
+          cp lib/armeabi-v7a/*.so ../libs/
+        fi
+        ls -la ../libs/
+        
+    - name: Analyze native libs
+      run: |
+        cd work/libs
+        for f in *.so; do
+          echo "=== $f ==="
+          file "$f"
+          echo "Size: $(stat -c%s "$f") bytes"
+          # Поиск ключевых строк для реверса
+          strings "$f" | grep -iE "aim|esp|wall|speed|recoil|hack|cheat|menu" | head -20 || true
+        done
+
+    - name: Backup original so files
+      run: |
+        mkdir -p output/backup
+        cp work/libs/*.so output/backup/
+
+    - name: Rebuild APK (clean repack test)
+      run: |
+        cd work
+        java -jar ../tools/apktool.jar b decoded -o repacked.apk --force
+
+    - name: Sign APK
+      run: |
+        cd work
+        java -jar ../tools/signer.jar -a repacked.apk --allowResign
+
+    - name: Prepare output
+      run: |
+        mkdir -p output
+        cp work/repacked-aligned-debugSigned.apk output/pm-mod-test.apk
+        cp work/original.apk output/original.apk
+        
+        # Дамп информации о библиотеках для анализа
+        cd work/libs
+        for f in *.so; do
+          echo "=== SYMBOLS: $f ===" >> ../symbols.txt
+          readelf -s "$f" 2>/dev/null | head -100 >> ../symbols.txt || true
+          echo "" >> ../symbols.txt
+        done
+        cp ../symbols.txt output/ 2>/dev/null || true
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: pm-build
+        path: output/
