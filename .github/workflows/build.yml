@@ -20,154 +20,16 @@ jobs:
     - name: Install tools
       run: |
         mkdir -p tools && cd tools
-        # apktool
         wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-        # signer
         wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
+        pip install cloudscraper --quiet
         ls -la
 
     - name: Download APK
       run: |
         mkdir -p work
         cd work
-        
-        # === Метод 1: cloudscraper (обход Cloudflare) ===
-        echo "=== Method 1: cloudscraper ==="
-        pip install cloudscraper --quiet
-        
-        python3 << 'PYEOF'
-import cloudscraper
-import re
-import os
-import sys
-
-scraper = cloudscraper.create_scraper(
-    browser={'browser': 'chrome', 'platform': 'android', 'desktop': False}
-)
-
-urls_to_try = [
-    "https://apkpure.com/pubg-mobile/com.tencent.ig/download?version=latest",
-    "https://apkpure.net/pubg-mobile/com.tencent.ig/download?version=latest",
-    "https://apkcombo.com/pubg-mobile/com.tencent.ig/download/apk",
-    "https://www.apkmonk.com/app/com.tencent.ig/",
-]
-
-for target in urls_to_try:
-    try:
-        print(f"\n--- Trying: {target} ---")
-        page = scraper.get(target, timeout=30)
-        print(f"Status: {page.status_code}, Size: {len(page.text)}")
-        
-        if page.status_code != 200:
-            continue
-        
-        # Паттерны для поиска ссылки на скачивание
-        patterns = [
-            r'href="(https?://[^"]+\.apk[^"]*)"',
-            r'data-dt-download-link="([^"]+)"',
-            r'"downloadUrl"\s*:\s*"([^"]+)"',
-            r'href="(/[^"]*download[^"]*\.apk[^"]*)"',
-            r'href="(/download[^"]*)"',
-            r'src="(https?://[^"]+\.apk[^"]*)"',
-            r'action="(https?://[^"]+\.apk[^"]*)"',
-            r'(https?://[^"\s]+\.apk)',
-        ]
-        
-        dl_url = None
-        for pat in patterns:
-            matches = re.findall(pat, page.text)
-            if matches:
-                dl_url = matches[0]
-                print(f"Found: {dl_url[:100]}")
-                break
-        
-        if not dl_url:
-            # Если нашли относительную ссылку — перейти по ней
-            rel_patterns = [
-                r'href="(/download[^"]*)"',
-                r'href="(/[^"]*\.apk[^"]*)"',
-            ]
-            for pat in rel_patterns:
-                matches = re.findall(pat, page.text)
-                if matches:
-                    dl_url = "https://apkpure.com" + matches[0]
-                    print(f"Relative URL: {dl_url[:100]}")
-                    break
-        
-        if dl_url:
-            print(f"\nDownloading from: {dl_url}")
-            r = scraper.get(dl_url, stream=True, timeout=600)
-            total = 0
-            with open("original.apk", "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024*1024):
-                    f.write(chunk)
-                    total += len(chunk)
-            size = os.path.getsize("original.apk")
-            print(f"Downloaded: {size} bytes ({size/1024/1024:.1f} MB)")
-            if size > 10000000:
-                print("SUCCESS")
-                sys.exit(0)
-        else:
-            print("No download link found")
-            # Вывести часть HTML для отладки
-            print("Page snippet:", page.text[:3000])
-    except Exception as e:
-        print(f"Error: {e}")
-        continue
-
-print("\nALL cloudscraper attempts failed")
-sys.exit(1)
-PYEOF
-        
-        # Проверка
-        if [ ! -f original.apk ]; then
-          echo "=== Method 1 failed ==="
-          
-          # === Метод 2: pip apkeep ===
-          echo "=== Method 2: apkeep ==="
-          pip install apkeep --quiet || true
-          if command -v apkeep &>/dev/null; then
-            apkeep -a com.tencent.ig -d apkpure .
-            ls -la
-          else
-            echo "apkeep not available"
-          fi
-          
-          # Проверяем результаты apkeep
-          for f in *.apk *.xapk; do
-            if [ -f "$f" ] && [ $(stat -c%s "$f") -gt 10000000 ]; then
-              echo "Found: $f ($(stat -c%s "$f") bytes)"
-              if [[ "$f" == *.xapk ]]; then
-                echo "XAPK detected, extracting..."
-                mkdir -p xapk_tmp
-                unzip -o "$f" -d xapk_tmp
-                ls -la xapk_tmp/
-                # Ищем основной APK
-                for apk in xapk_tmp/*.apk; do
-                  ASIZE=$(stat -c%s "$apk")
-                  echo "  $apk: $ASIZE bytes"
-                  if [ "$ASIZE" -gt 50000000 ]; then
-                    cp "$apk" original.apk
-                    echo "Using as original.apk"
-                    break
-                  fi
-                done
-              elif [[ "$f" == *.apk ]]; then
-                cp "$f" original.apk
-              fi
-              break
-            fi
-          done
-        fi
-        
-        # Финальная проверка
-        if [ ! -f original.apk ]; then
-          echo "=== ALL METHODS FAILED ==="
-          echo "Need manual APK upload"
-          exit 1
-        fi
-        
-        echo "=== SUCCESS ==="
+        python3 ../download_apk.py
         ls -la original.apk
         file original.apk
 
@@ -210,8 +72,8 @@ PYEOF
     - name: Prepare output
       run: |
         mkdir -p output
-        cp work/repacked-aligned-debugSigned.apk output/pm-mod-test.apk 2>/dev/null || true
-        cp work/original.apk output/original.apk 2>/dev/null || true
+        cp work/repacked-aligned-debugSigned.apk output/pm-mod-test.apk
+        cp work/original.apk output/original.apk
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
