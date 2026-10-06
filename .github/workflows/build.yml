@@ -2,9 +2,6 @@ name: Build Mod
 
 on: workflow_dispatch
 
-env:
-  APK_URL: "https://d.apkpure.com/b/APK/com.tencent.ig?version=latest"
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,9 +20,7 @@ jobs:
     - name: Download tools
       run: |
         mkdir -p tools && cd tools
-        # apktool с GitHub релизов
         wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-        # uber-apk-signer
         wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
         ls -la
 
@@ -33,9 +28,30 @@ jobs:
       run: |
         mkdir -p work
         cd work
-        wget -L -q "$APK_URL" -O original.apk
+        # Пробуем несколько источников
+        # Источник 1: APKCombo
+        wget -L -q "https://download.apkcombo.com/down.php?package=com.tencent.ig&versionCode=4600" -O original.apk 2>/dev/null || true
+        # Проверяем что скачалось
+        if [ ! -s original.apk ] || ! file original.apk | grep -q "Zip\|Android"; then
+          echo "Source 1 failed, trying source 2..."
+          # Источник 2: GitHub mirror PUBG APK
+          wget -L -q "https://github.com/nicehash2000/PUBG-Mobile-APK/raw/main/PUBG-Mobile-4.6.0.apk" -O original.apk 2>/dev/null || true
+        fi
+        if [ ! -s original.apk ] || ! file original.apk | grep -q "Zip\|Android"; then
+          echo "Source 2 failed, trying source 3..."
+          # Источник 3: прямая ссылка через curl с юзер-агентом
+          curl -L -A "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36" -o original.apk "https://d.apkpure.com/b/XAPK/com.tencent.ig?version=latest" 2>/dev/null || true
+        fi
+        # Проверка
         ls -la original.apk
         file original.apk
+        # Если файл меньше 10MB — что-то не так
+        SIZE=$(stat -c%s original.apk)
+        echo "File size: $SIZE bytes"
+        if [ "$SIZE" -lt 10000000 ]; then
+          echo "ERROR: APK too small, download failed"
+          exit 1
+        fi
 
     - name: Decompile APK
       run: |
