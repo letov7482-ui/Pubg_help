@@ -23,7 +23,6 @@ jobs:
         wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
         wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
         pip install cloudscraper --quiet
-        ls -la
 
     - name: Download APK
       run: |
@@ -31,7 +30,6 @@ jobs:
         cd work
         python3 ../download_apk.py
         ls -la original.apk
-        file original.apk
 
     - name: Decompile APK
       run: |
@@ -47,17 +45,49 @@ jobs:
         elif [ -d "lib/armeabi-v7a" ]; then
           cp lib/armeabi-v7a/*.so ../libs/
         fi
-        ls -la ../libs/
 
-    - name: Analyze native libs
+    - name: Full analysis report
       run: |
         cd work/libs
-        for f in *.so; do
-          echo "=== $f ==="
-          file "$f"
-          echo "Size: $(stat -c%s "$f") bytes"
-          strings "$f" | grep -iE "aim|esp|wall|speed|recoil|anti|detect|hook" | head -30 || true
+        
+        REPORT=../report.txt
+        echo "=== LIBRARY COUNT: $(ls *.so | wc -l) ===" > $REPORT
+        echo "" >> $REPORT
+        
+        echo "=== ALL LIBRARIES WITH SIZES ===" >> $REPORT
+        for f in $(ls -S *.so); do
+          SIZE=$(stat -c%s "$f")
+          SIZE_MB=$((SIZE / 1048576))
+          echo "${SIZE_MB}MB  $f" >> $REPORT
         done
+        echo "" >> $REPORT
+        
+        echo "=== CRITICAL TARGETS FOUND ===" >> $REPORT
+        for f in *.so; do
+          if [ $(stat -c%s "$f") -gt 50000000 ]; then
+            echo "ENGINE CANDIDATE: $f ($(stat -c%s "$f") bytes)" >> $REPORT
+          fi
+        done
+        echo "" >> $REPORT
+        
+        echo "=== LARGEST 5 LIBRARIES — KEY STRINGS ===" >> $REPORT
+        for f in $(ls -S *.so | head -5); do
+          echo "" >> $REPORT
+          echo "--- $f ($(stat -c%s "$f") bytes) ---" >> $REPORT
+          echo "UE4/Engine:" >> $REPORT
+          strings "$f" | grep -iE "GObjects|GNames|GEngine|GWorld|ProcessEvent|UWorld|AActor|APawn|FVector|FRotator|ULocalPlayer" | sort -u | head -20 >> $REPORT 2>/dev/null || true
+          echo "AntiCheat:" >> $REPORT
+          strings "$f" | grep -iE "anticheat|anti_cheat|detect_root|detect_hook|detect_frida|integrity_check|signature_check|memory_scan|ptrace_check" | sort -u | head -20 >> $REPORT 2>/dev/null || true
+          echo "Security:" >> $REPORT
+          strings "$f" | grep -iE "tersafe|sgmain|SecShell|DexHelper|NSaferOnly|boom|tp2|SecurityCheck" | sort -u | head -15 >> $REPORT 2>/dev/null || true
+        done
+        echo "" >> $REPORT
+        
+        echo "=== ALL .SO FILE NAMES ===" >> $REPORT
+        ls *.so >> $REPORT
+        echo "" >> $REPORT
+        
+        echo "=== REPORT COMPLETE ===" >> $REPORT
 
     - name: Rebuild APK
       run: |
@@ -72,11 +102,23 @@ jobs:
     - name: Prepare output
       run: |
         mkdir -p output
-        cp work/repacked-aligned-debugSigned.apk output/pm-mod-test.apk
-        cp work/original.apk output/original.apk
+        cp work/repacked-aligned-debugSigned.apk output/pm-mod-test.apk 2>/dev/null || true
+        cp work/original.apk output/original.apk 2>/dev/null || true
+        cp work/report.txt output/report.txt
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: pm-build
         path: output/
+
+    - name: PRINT SUMMARY AT END
+      run: |
+        echo ""
+        echo "=========================================="
+        echo "     CRITICAL INFO — READ BELOW"
+        echo "=========================================="
+        cat work/report.txt
+        echo "=========================================="
+        echo "     END OF REPORT"
+        echo "=========================================="
