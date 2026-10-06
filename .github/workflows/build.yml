@@ -23,15 +23,19 @@ jobs:
     - name: Download tools
       run: |
         mkdir -p tools && cd tools
-        wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
+        # apktool с GitHub релизов
+        wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+        # uber-apk-signer
         wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O signer.jar
+        ls -la
 
     - name: Download APK
       run: |
         mkdir -p work
         cd work
-        wget -q "$APK_URL" -O original.apk
+        wget -L -q "$APK_URL" -O original.apk
         ls -la original.apk
+        file original.apk
 
     - name: Decompile APK
       run: |
